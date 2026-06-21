@@ -11,6 +11,13 @@
 
 #define VALID_ARGS_COUNT 3
 
+/**
+ * @brief Convert a string argument to an integer.
+ *
+ * @param arg Pointer to the input string.
+ * 
+ * @return Converted integer value on success, -1 on invalid input.
+ */
 int to_number(char* arg) {
     char* number_end;
     long num = strtol(arg, &number_end, 10);
@@ -25,25 +32,46 @@ int to_number(char* arg) {
     return -1;
 }
 
-// This function returns whether the args parsed sucessfuly
+/**
+ * @brief Parse the command line arguments.
+ *
+ * @param argc Argument count from main.
+ * @param argsv Argument vector from main.
+ * @param target_number Output pointer for the target number to print.
+ * @param semaphore_count Output pointer for the number of semaphores/processes.
+ * 
+ * @return 1 if arguments are valid, 0 otherwise.
+ */
 int parse_input_args(int argc, char** argsv, int* target_number, int* semaphore_count) {
     if (argc != VALID_ARGS_COUNT) 
         return 0;
 
-    // These arguments have to be poistive numbers. so (-1) is an parse error
+    // These arguments have to be positive numbers. so (-1) is a parse error
     *target_number = to_number(argsv[1]);
     *semaphore_count = to_number(argsv[2]);
 
     return (*target_number >= 0 && *target_number < 10000) && (*semaphore_count > 0 && *semaphore_count <= 500);
 }
 
-int run_worker(int process_id, int target_number, int n_processes, sem_t* sem_array) {
+/**
+ * @brief Run a worker process to print every n-th number in sequence.
+ *
+ * Each worker waits for its semaphore and prints numbers assigned to it.
+ *
+ * @param process_id Worker process index (0-based).
+ * @param target_number Last number to print.
+ * @param n_processes Total number of worker processes.
+ * @param sem_array Shared semaphore array used for synchronization.
+ * 
+ * @return 0 always.
+ */
+void run_worker(int process_id, int target_number, int n_processes, sem_t* sem_array) {
     // Determine the starting number for this process
     // Process 0 prints 1, Process 1 prints 2 ... Process N-1 prints N
     int current_num = process_id + 1; 
 
     while (current_num <= target_number) {
-        // waiting for the semaphore for it's turn and decrementing our semaphore by n_processes - 1
+        // Waiting for the semaphore for its turn and decrementing our semaphore by `n_processes - 1`
         for (int j = 0; j < n_processes - 1; j++)
             sem_wait(&sem_array[process_id]);
 
@@ -61,6 +89,15 @@ int run_worker(int process_id, int target_number, int n_processes, sem_t* sem_ar
     }
 }
 
+/**
+ * @brief Spawn the worker processes for printing numbers.
+ *
+ * @param n_procceses Number of worker processes to create.
+ * @param target_number Last number to print.
+ * @param sem_array Shared semaphore array used for synchronization.
+ * 
+ * @return 0 if successful, 1 on fork failure.
+ */
 int spawn_processes(int n_procceses, int target_number, sem_t* sem_array) {
     for (int i = 0; i < n_procceses; i++) {
         pid_t pid = fork();
@@ -71,6 +108,8 @@ int spawn_processes(int n_procceses, int target_number, sem_t* sem_array) {
             exit(EXIT_OK);
         }
     }
+
+    return 0;
 }
 
 int main(int argc, char** argsv) {
