@@ -1,13 +1,14 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+
 #include <sys/types.h>
-#include <sys/ipc.h> // Interprocess communication
-#include <sys/sem.h> // Using semaphore
+#include <sys/ipc.h> 
+#include <sys/sem.h>
 #include <sys/wait.h>
 #include <sys/shm.h>
 
-#define VALID_ARGS_COUNT 2 // Including the executable name
+#define VALID_ARGS_COUNT 2 // Including the executable name: `program <N integer>
 
 // Semaphore control sheet
 union semun {
