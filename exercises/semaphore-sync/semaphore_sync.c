@@ -1,15 +1,22 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <semaphore.h>
 #include <ctype.h>
-#include <sys/mman.h>
+#include <unistd.h>
+
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
 #include <sys/wait.h>
 
-#define EXIT_OK 0 // Successful exit (no errors)
-#define ERR_USAGE 64 // Command line usage error
-
 #define VALID_ARGS_COUNT 3
+
+// Semaphore control sheet
+union semun {
+    int val;
+    struct semid_ds* buf;
+    unsigned short* array;
+    struct seminfo* __buf;
+};
 
 /**
  * @brief Convert a string argument to an integer.
@@ -53,6 +60,41 @@ int parse_input_args(int argc, char** argsv, int* target_number, int* semaphore_
     return (*target_number >= 0 && *target_number < 10000) && (*semaphore_count > 0 && *semaphore_count <= 500);
 }
 
+int init_semaphores(int n_processes) {
+    union semun arg;
+    
+    // Creating the semaphore in private mode
+    int semid = semget(IPC_PRIVATE, n_processes, IPC_CREAT | IPC_EXCL | 0600);
+    if (semid < 0)
+        return -1;
+
+    // Allocating an array that holds multiple semaphores
+    unsigned short* values = malloc(sizeof(unsigned short) * n_processes);
+    if (values == NULL) {
+        // Removing the semaphore in case of failure
+        semctl(semid, 0, IPC_RMID);
+        return -1;
+    }
+
+    // Setting a value for each semaphore
+    for (int i = 0; i < n_processes; i++)
+        values[i] = (unsigned short)(n_processes - 1 - i);
+
+    arg.array = values;
+    if (semctl(semid, 0, SETALL, arg) < 0) {
+        semctl(semid, 0, IPC_RMID);
+        free(values);
+        return -1;
+    }
+
+    free(values);
+    return semid;
+}
+
+int destroy_semaphores(int semid) {
+    return semctl(semid, 0, IPC_RMID);
+}
+
 /**
  * @brief Run a worker process to print every n-th number in sequence.
  *
@@ -65,26 +107,37 @@ int parse_input_args(int argc, char** argsv, int* target_number, int* semaphore_
  * 
  * @return 0 always.
  */
-void run_worker(int process_id, int target_number, int n_processes, sem_t* sem_array) {
+int semaphore_wait(int semid, int semnum) {
+    struct sembuf op = { .sem_num = semnum, .sem_op = -1, .sem_flg = 0 };
+    return semop(semid, &op, 1);
+}
+
+int semaphore_post(int semid, int semnum) {
+    struct sembuf op = { .sem_num = semnum, .sem_op = 1, .sem_flg = 0 };
+    return semop(semid, &op, 1);
+}
+
+void run_worker(int process_id, int target_number, int n_processes, int semid) {
     // Determine the starting number for this process
     // Process 0 prints 1, Process 1 prints 2 ... Process N-1 prints N
-    int current_num = process_id + 1; 
+    int current_num = process_id + 1;
 
     while (current_num <= target_number) {
-        // Waiting for the semaphore for its turn and decrementing our semaphore by `n_processes - 1`
-        for (int j = 0; j < n_processes - 1; j++)
-            sem_wait(&sem_array[process_id]);
+        for (int j = 0; j < n_processes - 1; j++) {
+            if (semaphore_wait(semid, process_id) < 0)
+                exit(EXIT_FAILURE);
+        }
 
         printf("%d\n", current_num);
         fflush(stdout);
 
-        // Increment ALL OTHER semaphores by 1
         for (int i = 0; i < n_processes; i++) {
-            if (i != process_id)
-                sem_post(&sem_array[i]);
+            if (i != process_id) {
+                if (semaphore_post(semid, i) < 0)
+                    exit(EXIT_FAILURE);
+            }
         }
 
-        // Jump to the next number this process is responsible for
         current_num += n_processes;
     }
 }
@@ -98,14 +151,14 @@ void run_worker(int process_id, int target_number, int n_processes, sem_t* sem_a
  * 
  * @return 0 if successful, 1 on fork failure.
  */
-int spawn_processes(int n_procceses, int target_number, sem_t* sem_array) {
-    for (int i = 0; i < n_procceses; i++) {
+int spawn_processes(int n_processes, int target_number, int semid) {
+    for (int i = 0; i < n_processes; i++) {
         pid_t pid = fork();
         if (pid < 0) return 1;
         if (pid == 0) {
             // Child process code execution
-            run_worker(i, target_number, n_procceses, sem_array);
-            exit(EXIT_OK);
+            run_worker(i, target_number, n_processes, semid);
+            exit(EXIT_SUCCESS);
         }
     }
 
@@ -122,27 +175,19 @@ int main(int argc, char** argsv) {
         return EXIT_FAILURE;
     }
 
-    sem_t *sem_array = mmap(NULL, semaphore_count * sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    if (sem_array == MAP_FAILED) return EXIT_FAILURE;
+    int semid = init_semaphores(semaphore_count);
+    if (semid < 0) return EXIT_FAILURE;
 
-    // We actually assigning a number to each semaphore inside the `sem_array` to run.
-    for (int i = 0; i < semaphore_count; i++) {
-        // The second parameter `1` indicates the semaphore is shared between PROCESSES
-        if (sem_init(&sem_array[i], 1, semaphore_count - 1 - i) != 0)
-            return EXIT_FAILURE;
+    if (spawn_processes(semaphore_count, target_number, semid) != 0) {
+        destroy_semaphores(semid);
+        return EXIT_FAILURE;
     }
-
-    spawn_processes(semaphore_count, target_number, sem_array);
     
     // Waiting for the processes to exit
-    for (int i = 0; i < target_number; i++)
+    for (int i = 0; i < semaphore_count; i++)
         wait(NULL);
 
-    // Clean up semaphores and unmap shared memory
-    for (int i = 0; i < semaphore_count; i++)
-        sem_destroy(&sem_array[i]);
-
-    munmap(sem_array, semaphore_count * sizeof(sem_t));
+    destroy_semaphores(semid);
 
     return 0;
 }
